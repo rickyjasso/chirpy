@@ -73,13 +73,13 @@ func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request)
 	var req requestBody
 	err := decoder.Decode(&req)
 	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Invalid JSON", err)
+		respondWithError(w, http.StatusInternalServerError, "Error decoding request", err)
 		return
 	}
 
 	token, err := auth.GetBearerToken(r.Header)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Error getting token", err)
+		respondWithError(w, http.StatusUnauthorized, "Error getting token", err)
 		return
 	}
 
@@ -117,7 +117,7 @@ func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request)
 		UserID: userID,
 	})
 	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Error creating chirp", err)
+		respondWithError(w, http.StatusInternalServerError, "Error creating chirp", err)
 		return
 	}
 
@@ -155,7 +155,7 @@ func (cfg *apiConfig) handlerChirps(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) handlerChirpById(w http.ResponseWriter, r *http.Request) {
 	chirpId := r.PathValue("chirpID")
 	if chirpId == "" {
-		respondWithError(w, http.StatusBadRequest, "Invalid ID", nil)
+		respondWithError(w, http.StatusBadRequest, "Invalid chirp ID", nil)
 	}
 
 	uuid, err := uuid.Parse(chirpId)
@@ -188,7 +188,7 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
 	var req RequestBody
 	err := decoder.Decode(&req)
 	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Invalid JSON", err)
+		respondWithError(w, http.StatusInternalServerError, "Error decoding request", err)
 		return
 	}
 
@@ -230,17 +230,17 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 	var req RequestBody
 	err := decoder.Decode(&req)
 	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Invalid JSON", err)
+		respondWithError(w, http.StatusInternalServerError, "Error decoding request", err)
 	}
 
 	user, err := cfg.db.GetUserByEmail(r.Context(), req.Email)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Error getting user", err)
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password", err)
 	}
 
 	valid, err := auth.CheckPasswordHash(req.Password, user.HashedPassword)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Error comparing hash", err)
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password", err)
 	}
 
 	token, err := auth.MakeJWT(user.ID, cfg.secretKey, time.Hour)
@@ -318,4 +318,106 @@ func (cfg *apiConfig) handlerRevoke(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusNoContent)
 
+}
+
+func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) {
+	// get the token from the header
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Error getting token", err)
+		return
+	}
+
+	// get the user from the token
+	userID, err := auth.ValidateJWT(token, cfg.secretKey)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Invalid or malformed JWT", err)
+		return
+	}
+
+	// having the user, now execute the update
+	type request struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	var req request
+	defer r.Body.Close()
+	decoder := json.NewDecoder(r.Body)
+	err = decoder.Decode(&req)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error decoding body", err)
+		return
+	}
+
+	newEmail := req.Email
+	newPassword := req.Password
+
+	// hash the password
+	hashedPwd, err := auth.HashPassword(newPassword)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error hashing password", err)
+		return
+	}
+
+	updatedUser, err := cfg.db.UpdateUser(r.Context(), database.UpdateUserParams{
+		Email:          newEmail,
+		HashedPassword: hashedPwd,
+		ID:             userID,
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error updating user", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, User{
+		ID:        updatedUser.ID,
+		CreatedAt: updatedUser.CreatedAt,
+		UpdatedAt: updatedUser.UpdatedAt,
+		Email:     updatedUser.Email,
+	})
+
+}
+
+func (cfg *apiConfig) handlerDeleteChirp(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Error getting token", err)
+		return
+	}
+	chirpId := r.PathValue("chirpID")
+	if chirpId == "" {
+		respondWithError(w, http.StatusBadRequest, "Invalid chirp ID", nil)
+		return
+	}
+	id, err := uuid.Parse(chirpId)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error parsing chirpID to UUID", err)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.secretKey)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Error validating JWT", err)
+		return
+	}
+
+	chirp, err := cfg.db.GetChirp(r.Context(), id)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, "Chirp not found", err)
+		return
+	}
+
+	if chirp.UserID != userID {
+		respondWithError(w, http.StatusForbidden, "User is not the author of this chirp!", err)
+		return
+	}
+
+	err = cfg.db.DeleteChirp(r.Context(), id)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error deleting chirp", err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }

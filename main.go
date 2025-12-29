@@ -61,6 +61,7 @@ func main() {
 	mux.HandleFunc("POST /api/refresh", apiCfg.handlerRefreshToken)
 	mux.HandleFunc("POST /api/revoke", apiCfg.handlerRevoke)
 	mux.HandleFunc("PUT /api/users", apiCfg.handlerUpdateUser)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.handlerDeleteChirp)
 
 	server := http.Server{
 		Handler: mux,
